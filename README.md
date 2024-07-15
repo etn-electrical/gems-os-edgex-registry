@@ -3,7 +3,7 @@
 This repository provides the Golang SDK for the EdgeX Registry service available in the BLE Linux. The SDK provided here contains all the patches and updates required to make the SDK compatible with registry service running in the edge device.
 
 > [!NOTE]  
-> This repository is not intended to follow the official EdgeX SDK release cycle. The SDK provided here is a fork of the official EdgeX SDK, locked to a specific hash and patched to work with BLE Linux.
+> This repository is not intended to follow the official EdgeX SDK release cycle. The SDK provided here is a fork of the official EdgeX SDK, locked to a specific commit hash and patched to work with BLE Linux.
 
 ## Setup and Installation
 
