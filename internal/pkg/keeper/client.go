@@ -1,23 +1,26 @@
 //
-// Copyright (C) 2022 IOTech Ltd
+// Copyright (C) 2024 IOTech Ltd
 //
 // SPDX-License-Identifier: Apache-2.0
 
 package keeper
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/edgexfoundry/go-mod-registry/v2/pkg/types"
+	httpClient "github.com/edgexfoundry/go-mod-core-contracts/v3/clients/http"
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/clients/interfaces"
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/common"
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/dtos"
+	dtoCommon "github.com/edgexfoundry/go-mod-core-contracts/v3/dtos/common"
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/dtos/requests"
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/models"
+
+	"github.com/edgexfoundry/go-mod-registry/v3/pkg/types"
 )
-
-const defaultTimeout = 10 * time.Second
 
 type keeperClient struct {
 	config              *types.Config
@@ -27,8 +30,12 @@ type keeperClient struct {
 	servicePort         int
 	healthCheckRoute    string
 	healthCheckInterval string
+
+	commonClient   interfaces.CommonClient
+	registryClient interfaces.RegistryClient
 }
 
+// NewKeeperClient creates new Keeper Client. Service details are optional, not needed just for configuration, but required if registering
 func NewKeeperClient(registryConfig types.Config) (*keeperClient, error) {
 	client := keeperClient{
 		config:     &registryConfig,
@@ -44,24 +51,37 @@ func NewKeeperClient(registryConfig types.Config) (*keeperClient, error) {
 		client.healthCheckInterval = registryConfig.CheckInterval
 	}
 
+	// Create the common and registry http clients for invoking APIs from Keeper
+	client.commonClient = httpClient.NewCommonClient(client.keeperUrl, registryConfig.AuthInjector)
+	client.registryClient = httpClient.NewRegistryClient(client.keeperUrl, registryConfig.AuthInjector, registryConfig.EnableNameFieldEscape)
+
 	return &client, nil
 }
 
+// IsAlive simply checks if Keeper is up and running at the configured URL
+func (k *keeperClient) IsAlive() bool {
+	if _, err := k.commonClient.Ping(context.Background()); err != nil {
+		return false
+	}
+	return true
+}
+
+// Register registers the current service with Keeper for discovery and health check
 func (k *keeperClient) Register() error {
 	if k.serviceKey == "" || k.serviceHost == "" || k.servicePort == 0 ||
 		k.healthCheckRoute == "" || k.healthCheckInterval == "" {
 		return fmt.Errorf("unable to register service with keeper: Service information not set")
 	}
 
-	registrationReq := AddRegistrationRequest{
-		BaseRequest: BaseRequest{
-			Versionable: Versionable{ApiVersion: ApiVersion},
+	registrationReq := requests.AddRegistrationRequest{
+		BaseRequest: dtoCommon.BaseRequest{
+			Versionable: dtoCommon.Versionable{ApiVersion: common.ApiVersion},
 		},
-		Registration: RegistrationDTO{
+		Registration: dtos.Registration{
 			ServiceId: k.serviceKey,
 			Host:      k.serviceHost,
 			Port:      k.servicePort,
-			HealthCheck: HealthCheck{
+			HealthCheck: dtos.HealthCheck{
 				Interval: k.healthCheckInterval,
 				Path:     k.healthCheckRoute,
 				Type:     "http",
@@ -69,178 +89,94 @@ func (k *keeperClient) Register() error {
 		},
 	}
 
-	jsonEncodedData, err := json.Marshal(registrationReq)
-	if err != nil {
-		return fmt.Errorf("failed to encode registration request: %s", err.Error())
-	}
-
 	// check if the service registry exists first
-	resp, err := getRegistryByService(k.config.GetRegistryUrl() + ApiRegistrationByServiceIdRoute + k.serviceKey)
-	if err != nil {
-		return fmt.Errorf("failed to check the %s service registry status: %s", k.serviceKey, err.Error())
+	resp, err := k.registryClient.RegistrationByServiceId(context.Background(), k.serviceKey)
+	if err != nil && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("failed to check the %s service registry status: %v", k.serviceKey, err)
 	}
 
-	// call the PUT registry API to update the registry if the service already exists
-	// otherwise, call the POST API to create the registry
-	httpMethod := http.MethodPost
+	// call the UpdateRegister to update the registry if the service already exists
+	// otherwise, call Register to create a new registry
 	if resp.StatusCode == http.StatusOK {
-		httpMethod = http.MethodPut
-	}
-	req, err := http.NewRequest(httpMethod, k.config.GetRegistryUrl()+ApiRegisterRoute, bytes.NewReader(jsonEncodedData))
-	if err != nil {
-		return fmt.Errorf("failed to create register request: %s", err.Error())
-	}
-	req.Header.Set(ContentType, ContentTypeJSON)
-
-	client := http.Client{Timeout: defaultTimeout}
-	resp, err = client.Do(req)
-	if err != nil {
-		return fmt.Errorf("http error: %s", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		var response BaseResponse
-		bodyBytes, err := io.ReadAll(resp.Body)
+		err := k.registryClient.UpdateRegister(context.Background(), registrationReq)
 		if err != nil {
-			return fmt.Errorf("failed to read response body: %s", err.Error())
+			return fmt.Errorf("failed to update the %s service registry: %v", k.serviceKey, err)
 		}
-		err = json.Unmarshal(bodyBytes, &response)
+	} else {
+		err := k.registryClient.Register(context.Background(), registrationReq)
 		if err != nil {
-			return fmt.Errorf("failed to decode response body: %s", err.Error())
+			return fmt.Errorf("failed to register the %s service: %v", k.serviceKey, err)
 		}
-		return fmt.Errorf("failed to register %s: %s", k.serviceKey, response.Message)
 	}
 
 	return nil
 }
 
-func (k *keeperClient) Unregister() error {
-	req, err := http.NewRequest(http.MethodDelete, k.config.GetRegistryUrl()+ApiRegistrationByServiceIdRoute+k.serviceKey, http.NoBody)
-	if err != nil {
-		return fmt.Errorf("failed to create unregister request: %s", err.Error())
-	}
-
-	client := http.Client{Timeout: defaultTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("http error: %s", err.Error())
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent {
-		var response BaseResponse
-		bodyBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response body: %s", err.Error())
-		}
-		err = json.Unmarshal(bodyBytes, &response)
-		if err != nil {
-			return fmt.Errorf("failed to decode response body: %s", err.Error())
-		}
-		return fmt.Errorf("failed to unregister %s: %s", k.serviceKey, response.Message)
-	}
-
-	return nil
-}
-
+// RegisterCheck registers a health check with Keeper
 func (k *keeperClient) RegisterCheck(id string, name string, notes string, url string, interval string) error {
 	// keeper combines service discovery and health check into one single register request
 	return nil
 }
 
-func (k *keeperClient) IsAlive() bool {
-	client := http.Client{Timeout: defaultTimeout}
-	resp, err := client.Get(k.keeperUrl + ApiPingRoute)
-	if err != nil {
-		return false
-	}
-
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		return true
-	}
-
-	return false
+func (k *keeperClient) UnregisterCheck(id string) error {
+	// keeper combines service discovery and health check into one single register request
+	return nil
 }
 
+// Unregister de-registers the current service from Keeper
+func (k *keeperClient) Unregister() error {
+	registrationReq := requests.AddRegistrationRequest{
+		BaseRequest: dtoCommon.BaseRequest{
+			Versionable: dtoCommon.Versionable{ApiVersion: common.ApiVersion},
+		},
+		Registration: dtos.Registration{
+			ServiceId: k.serviceKey,
+			Host:      k.serviceHost,
+			Port:      k.servicePort,
+			HealthCheck: dtos.HealthCheck{
+				Interval: k.healthCheckInterval,
+				Path:     k.healthCheckRoute,
+				Type:     "http",
+			},
+			Status: models.Halt,
+		},
+	}
+
+	err := k.registryClient.UpdateRegister(context.Background(), registrationReq)
+	if err != nil {
+		return fmt.Errorf("failed to de-register %s: %v", k.serviceKey, err)
+	}
+
+	return nil
+}
+
+// GetServiceEndpoint retrieves the port, service ID and host of a known endpoint from Keeper.
+// If this operation is successful and a known endpoint is found, it is returned. Otherwise, an error is returned.
 func (k *keeperClient) GetServiceEndpoint(serviceKey string) (types.ServiceEndpoint, error) {
-	req, err := http.NewRequest(http.MethodGet, k.config.GetRegistryUrl()+ApiRegistrationByServiceIdRoute+serviceKey, http.NoBody)
+	resp, err := k.registryClient.RegistrationByServiceId(context.Background(), serviceKey)
 	if err != nil {
-		return types.ServiceEndpoint{}, fmt.Errorf("failed to create http request: %s", err.Error())
-	}
-
-	client := http.Client{Timeout: defaultTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return types.ServiceEndpoint{}, fmt.Errorf("http error: %s", err.Error())
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return types.ServiceEndpoint{}, fmt.Errorf("failed to read response body: %s", err.Error())
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var response BaseResponse
-		err = json.Unmarshal(bodyBytes, &response)
-		if err != nil {
-			return types.ServiceEndpoint{}, fmt.Errorf("failed to decode response body: %s", err.Error())
-		}
-		return types.ServiceEndpoint{}, fmt.Errorf("failed to get service endpoint: %s", response.Message)
-	}
-
-	var r RegistrationResponse
-	err = json.Unmarshal(bodyBytes, &r)
-	if err != nil {
-		return types.ServiceEndpoint{}, fmt.Errorf("failed to decode response body: %s", err.Error())
+		return types.ServiceEndpoint{}, fmt.Errorf("failed to get service %s endpoint: %v", serviceKey, err)
 	}
 
 	endpoint := types.ServiceEndpoint{
 		ServiceId: serviceKey,
-		Host:      r.Registration.Host,
-		Port:      r.Registration.Port,
+		Host:      resp.Registration.Host,
+		Port:      resp.Registration.Port,
 	}
 
 	return endpoint, nil
 }
 
+// GetAllServiceEndpoints retrieves all registered endpoints from Keeper.
 func (k *keeperClient) GetAllServiceEndpoints() ([]types.ServiceEndpoint, error) {
-	req, err := http.NewRequest(http.MethodGet, k.config.GetRegistryUrl()+ApiAllRegistrationRoute, http.NoBody)
+	// filter out registrations with status is HALT which have been deregistered
+	resp, err := k.registryClient.AllRegistry(context.Background(), false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create http request: %s", err.Error())
+		return nil, fmt.Errorf("failed to get all service endpoints: %v", err)
 	}
 
-	client := http.Client{Timeout: defaultTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http error: %s", err.Error())
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %s", err.Error())
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var response BaseResponse
-		err = json.Unmarshal(bodyBytes, &response)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode response body: %s", err.Error())
-		}
-		return nil, fmt.Errorf("failed to get all service endpoints: %s", response.Message)
-
-	}
-
-	var responseDTO MultiRegistrationsResponse
-	err = json.Unmarshal(bodyBytes, &responseDTO)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode response body: %s", err.Error())
-	}
-
-	endpoints := make([]types.ServiceEndpoint, len(responseDTO.Registrations))
-	for idx, r := range responseDTO.Registrations {
+	endpoints := make([]types.ServiceEndpoint, len(resp.Registrations))
+	for idx, r := range resp.Registrations {
 		endpoint := types.ServiceEndpoint{
 			ServiceId: r.ServiceId,
 			Host:      r.Host,
@@ -252,43 +188,19 @@ func (k *keeperClient) GetAllServiceEndpoints() ([]types.ServiceEndpoint, error)
 	return endpoints, nil
 }
 
-// getRegistryByService invokes the GET registry by service API and returns the response
-func getRegistryByService(registryUrl string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodGet, registryUrl, http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create http request: %s", err.Error())
-	}
-
-	client := http.Client{Timeout: defaultTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http error: %s", err.Error())
-	}
-
-	return resp, nil
-}
-
+// IsServiceAvailable checks with Keeper if the target service is registered and healthy
 func (k *keeperClient) IsServiceAvailable(serviceKey string) (bool, error) {
-	resp, err := getRegistryByService(k.config.GetRegistryUrl() + ApiRegistrationByServiceIdRoute + serviceKey)
-	if err != nil {
-		return false, fmt.Errorf("failed to get %s service registry: %s", serviceKey, err.Error())
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false, fmt.Errorf("failed to read response body: %s", err.Error())
+	resp, err := k.registryClient.RegistrationByServiceId(context.Background(), serviceKey)
+	if err != nil && resp.StatusCode != http.StatusNotFound {
+		return false, fmt.Errorf("failed to get %s service registry: %v", serviceKey, err)
 	}
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		var response RegistrationResponse
-		err = json.Unmarshal(bodyBytes, &response)
-		if err != nil {
-			return false, fmt.Errorf("failed to decode response body: %s", err.Error())
+		if strings.EqualFold(resp.Registration.Status, models.Halt) {
+			return false, fmt.Errorf(" %s service has been unregistered", serviceKey)
 		}
-
-		if !strings.EqualFold(response.Registration.Status, "up") {
+		if !strings.EqualFold(resp.Registration.Status, "up") {
 			return false, fmt.Errorf(" %s service not healthy...", serviceKey)
 		}
 
@@ -296,11 +208,6 @@ func (k *keeperClient) IsServiceAvailable(serviceKey string) (bool, error) {
 	case http.StatusNotFound:
 		return false, fmt.Errorf("%s service is not registered. Might not have started... ", serviceKey)
 	default:
-		var response BaseResponse
-		err = json.Unmarshal(bodyBytes, &response)
-		if err != nil {
-			return false, fmt.Errorf("failed to decode response body: %s", err.Error())
-		}
-		return false, fmt.Errorf("failed to check service availability: %s", response.Message)
+		return false, fmt.Errorf("failed to check service availability: %s", resp.Message)
 	}
 }

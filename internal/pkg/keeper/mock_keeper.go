@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2022 IOTech Ltd
+// Copyright (C) 2024 IOTech Ltd
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -14,16 +14,22 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/common"
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/dtos"
+	dtoCommon "github.com/edgexfoundry/go-mod-core-contracts/v3/dtos/common"
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/dtos/requests"
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/dtos/responses"
 )
 
 type MockKeeper struct {
-	serviceStore map[string]RegistrationDTO
+	serviceStore map[string]dtos.Registration
 	serviceLock  sync.Mutex
 }
 
 func NewMockKeeper() *MockKeeper {
 	mock := MockKeeper{
-		serviceStore: make(map[string]RegistrationDTO),
+		serviceStore: make(map[string]dtos.Registration),
 	}
 
 	return &mock
@@ -31,7 +37,7 @@ func NewMockKeeper() *MockKeeper {
 
 func (mock *MockKeeper) Start() *httptest.Server {
 	testMockServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if strings.HasSuffix(request.URL.Path, ApiRegisterRoute) {
+		if strings.HasSuffix(request.URL.Path, common.ApiRegisterRoute) {
 			switch request.Method {
 			case http.MethodPost:
 				mock.serviceLock.Lock()
@@ -42,7 +48,7 @@ func (mock *MockKeeper) Start() *httptest.Server {
 					log.Printf("error reading request body: %s", err.Error())
 				}
 
-				var req AddRegistrationRequest
+				var req requests.AddRegistrationRequest
 				err = json.Unmarshal(bodyBytes, &req)
 				if err != nil {
 					log.Printf("error decoding request body: %s", err.Error())
@@ -60,7 +66,7 @@ func (mock *MockKeeper) Start() *httptest.Server {
 				}
 				mock.serviceStore[req.Registration.ServiceId] = req.Registration
 
-				writer.Header().Set(ContentTypeJSON, ContentTypeJSON)
+				writer.Header().Set(common.ContentTypeJSON, common.ContentTypeJSON)
 				writer.WriteHeader(http.StatusCreated)
 			case http.MethodPut:
 				mock.serviceLock.Lock()
@@ -71,7 +77,7 @@ func (mock *MockKeeper) Start() *httptest.Server {
 					log.Printf("error reading request body: %s", err.Error())
 				}
 
-				var req AddRegistrationRequest
+				var req requests.AddRegistrationRequest
 				err = json.Unmarshal(bodyBytes, &req)
 				if err != nil {
 					log.Printf("error decoding request body: %s", err.Error())
@@ -80,20 +86,20 @@ func (mock *MockKeeper) Start() *httptest.Server {
 
 				writer.WriteHeader(http.StatusNoContent)
 			}
-		} else if strings.HasSuffix(request.URL.Path, ApiAllRegistrationRoute) {
+		} else if strings.HasSuffix(request.URL.Path, common.ApiAllRegistrationsRoute) {
 			switch request.Method {
 			case http.MethodGet:
 				mock.serviceLock.Lock()
 				defer mock.serviceLock.Unlock()
 
-				var registrations []RegistrationDTO
+				var registrations []dtos.Registration
 				for _, r := range mock.serviceStore {
 					registrations = append(registrations, r)
 				}
-				res := MultiRegistrationsResponse{
-					BaseWithTotalCountResponse: BaseWithTotalCountResponse{
-						BaseResponse: BaseResponse{
-							Versionable: Versionable{ApiVersion: ApiVersion},
+				resp := responses.MultiRegistrationsResponse{
+					BaseWithTotalCountResponse: dtoCommon.BaseWithTotalCountResponse{
+						BaseResponse: dtoCommon.BaseResponse{
+							Versionable: dtoCommon.Versionable{ApiVersion: common.ApiVersion},
 							RequestId:   "",
 							Message:     "",
 							StatusCode:  200,
@@ -102,8 +108,8 @@ func (mock *MockKeeper) Start() *httptest.Server {
 					},
 					Registrations: registrations,
 				}
-				jsonData, _ := json.Marshal(res)
-				writer.Header().Set(ContentType, ContentTypeJSON)
+				jsonData, _ := json.Marshal(resp)
+				writer.Header().Set(common.ContentType, common.ContentTypeJSON)
 				writer.WriteHeader(http.StatusOK)
 				_, err := writer.Write(jsonData)
 				if err != nil {
@@ -114,33 +120,29 @@ func (mock *MockKeeper) Start() *httptest.Server {
 			key := strings.Replace(request.URL.Path, ApiRegistrationByServiceIdRoute, "", 1)
 			switch request.Method {
 			case http.MethodGet:
-				var res interface{}
-				var statusCode int
+				var resp interface{}
 				r, ok := mock.serviceStore[key]
 				if !ok {
-					res = BaseResponse{
-						Versionable: Versionable{ApiVersion: ApiVersion},
+					resp = dtoCommon.BaseResponse{
+						Versionable: dtoCommon.Versionable{ApiVersion: common.ApiVersion},
 						RequestId:   "",
 						Message:     "not found",
-						StatusCode:  404,
+						StatusCode:  http.StatusNotFound,
 					}
-					statusCode = 404
 				} else {
-					res = RegistrationResponse{
-						BaseResponse: BaseResponse{
-							Versionable: Versionable{ApiVersion: ApiVersion},
+					resp = responses.RegistrationResponse{
+						BaseResponse: dtoCommon.BaseResponse{
+							Versionable: dtoCommon.Versionable{ApiVersion: common.ApiVersion},
 							RequestId:   "",
 							Message:     "",
-							StatusCode:  200,
+							StatusCode:  http.StatusOK,
 						},
 						Registration: r,
 					}
-					statusCode = 200
 				}
 
-				jsonData, _ := json.Marshal(res)
-				writer.Header().Set(ContentType, ContentTypeJSON)
-				writer.WriteHeader(statusCode)
+				jsonData, _ := json.Marshal(resp)
+				writer.Header().Set(common.ContentType, common.ContentTypeJSON)
 				_, err := writer.Write(jsonData)
 				if err != nil {
 					log.Printf("error writing data response: %s", err.Error())
@@ -156,11 +158,17 @@ func (mock *MockKeeper) Start() *httptest.Server {
 
 				writer.WriteHeader(http.StatusNoContent)
 			}
-		} else if strings.Contains(request.URL.Path, ApiPingRoute) {
+		} else if strings.Contains(request.URL.Path, common.ApiPingRoute) {
 			switch request.Method {
 			case http.MethodGet:
-				writer.Header().Set(ContentType, ContentTypeText)
-				_, _ = writer.Write([]byte("pong"))
+				resp := dtoCommon.PingResponse{
+					Versionable: dtoCommon.Versionable{ApiVersion: common.ApiVersion},
+					Timestamp:   "",
+					ServiceName: "",
+				}
+				jsonData, _ := json.Marshal(resp)
+				writer.Header().Set(common.ContentType, common.ContentTypeJSON)
+				_, _ = writer.Write(jsonData)
 			}
 		}
 	}))

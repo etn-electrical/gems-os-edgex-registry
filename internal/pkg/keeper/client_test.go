@@ -1,5 +1,5 @@
 //
-// Copyright (C) 2022 IOTech Ltd
+// Copyright (C) 2024 IOTech Ltd
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -17,11 +17,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/edgexfoundry/go-mod-registry/v2/pkg/types"
+	"github.com/edgexfoundry/go-mod-core-contracts/v3/common"
+
+	"github.com/edgexfoundry/go-mod-registry/v3/pkg/types"
 )
 
 const (
-	serviceName        = "consulUnitTest"
+	serviceName        = "keeperUnitTest"
 	defaultServiceHost = "localhost"
 	defaultServicePort = 8000
 )
@@ -73,12 +75,12 @@ func TestRegisterWithPingCallback(t *testing.T) {
 
 	// Setup a server to simulate the service for the health check callback
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if strings.Contains(request.URL.Path, ApiPingRoute) {
+		if strings.Contains(request.URL.Path, common.ApiPingRoute) {
 			switch request.Method {
 			case http.MethodGet:
 				receivedPing = true
 
-				writer.Header().Set(ContentType, ContentTypeText)
+				writer.Header().Set(common.ContentType, common.ContentTypeText)
 				_, _ = writer.Write([]byte("pong"))
 
 				doneChan <- true
@@ -93,8 +95,6 @@ func TestRegisterWithPingCallback(t *testing.T) {
 	serverPort, _ := strconv.Atoi(serverUrl.Port())
 
 	client := makeKeeperClient(t, getUniqueServiceName(), serverHost, serverPort, true)
-	// Make sure service is not already registered.
-	_ = client.Unregister()
 
 	// Try to clean-up after test
 	defer func() {
@@ -148,12 +148,11 @@ func TestUnregister(t *testing.T) {
 	require.NoError(t, err, "Error un-registering service")
 
 	_, err = client.GetServiceEndpoint(client.serviceKey)
-	require.Error(t, err, "Expected error getting service endpoint")
+	require.NoError(t, err, "Expected no error since service registry still exists after un-registering")
 }
 
 func TestGetServiceEndpoint(t *testing.T) {
 	uniqueServiceName := getUniqueServiceName()
-	expectedNotFoundEndpoint := types.ServiceEndpoint{}
 	expectedFoundEndpoint := types.ServiceEndpoint{
 		ServiceId: uniqueServiceName,
 		Host:      defaultServiceHost,
@@ -171,9 +170,9 @@ func TestGetServiceEndpoint(t *testing.T) {
 
 	// Test for endpoint not found
 	actualEndpoint, err := client.GetServiceEndpoint(client.serviceKey)
-	require.Error(t, err)
+	require.NoError(t, err)
 
-	require.Equal(t, expectedNotFoundEndpoint, actualEndpoint, "Test for endpoint not found result not as expected")
+	require.Equal(t, expectedFoundEndpoint, actualEndpoint, "Test for unregistered endpoint found result not as expected")
 
 	// Register the service endpoint
 	err = client.Register()
@@ -197,7 +196,7 @@ func TestIsServiceAvailableNotRegistered(t *testing.T) {
 
 	require.False(t, actual)
 	require.Error(t, err, "expected error")
-	require.Contains(t, err.Error(), "service is not registered", "Wrong error")
+	require.Contains(t, err.Error(), "service has been unregistered", "Wrong error")
 }
 
 func TestIsServiceAvailableNotHealthy(t *testing.T) {
@@ -230,10 +229,10 @@ func TestIsServiceAvailableHealthy(t *testing.T) {
 
 	// Setup a server to simulate the service for the health check callback
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if strings.Contains(request.URL.Path, ApiPingRoute) {
+		if strings.Contains(request.URL.Path, common.ApiPingRoute) {
 			switch request.Method {
 			case http.MethodGet:
-				writer.Header().Set(ContentType, ContentTypeText)
+				writer.Header().Set(common.ContentType, common.ContentTypeText)
 				_, _ = writer.Write([]byte("pong"))
 
 				doneChan <- true
@@ -248,8 +247,6 @@ func TestIsServiceAvailableHealthy(t *testing.T) {
 	serverPort, _ := strconv.Atoi(serverUrl.Port())
 
 	client := makeKeeperClient(t, getUniqueServiceName(), serverHost, serverPort, true)
-	// Make sure service is not already registered.
-	_ = client.Unregister()
 
 	// Try to clean-up after test
 	defer func() {
@@ -279,8 +276,9 @@ func makeKeeperClient(t *testing.T, serviceName string, serviceHost string, serv
 		Host:          testRegistryHost,
 		Port:          testRegistryPort,
 		CheckInterval: "1s",
-		CheckRoute:    ApiPingRoute,
+		CheckRoute:    common.ApiPingRoute,
 		ServiceKey:    serviceName,
+		AuthInjector:  NewNullAuthenticationInjector(),
 	}
 
 	if setServiceInfo {
